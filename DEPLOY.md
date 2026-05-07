@@ -1,8 +1,55 @@
-# VPS deployment
+# Deployment
 
-Two recipes — pick whichever is closer to how you like to run things.
+Three recipes — pick the closest to how you like to run things.
 
-## Option A — Docker Compose (recommended)
+## Option A — fly.io (cheapest, fastest)
+
+The repo includes a working `fly.toml`. The bot needs a single always-on
+machine; long polling means no public URL or open port is required.
+
+```bash
+# 1. Install flyctl + auth.
+curl -fsSL https://fly.io/install.sh | sh
+export PATH="$HOME/.fly/bin:$PATH"
+flyctl auth login    # or: export FLY_API_TOKEN=...
+
+# 2. Create the app + persistent volume (one-time).
+flyctl apps create tims-ai-bot --org personal
+flyctl volumes create bot_data --app tims-ai-bot --region fra --size 1 --yes
+
+# 3. Stage all secrets (no machine running yet, so use --stage).
+flyctl secrets set --app tims-ai-bot --stage \
+  BOT_TOKEN=8765... \
+  ADMIN_IDS=123456789 \
+  LLM_API_KEY=gsk_or_sk_... \
+  LLM_BASE_URL=https://api.groq.com/openai/v1 \
+  LLM_MODEL=llama-3.3-70b-versatile \
+  LLM_SUMMARY_MODEL=llama-3.1-8b-instant
+
+# 4. First deploy. ha=false keeps it to a single machine (no duplicate polling).
+flyctl deploy --ha=false
+```
+
+After that:
+
+```bash
+flyctl logs --app tims-ai-bot         # tail
+flyctl status --app tims-ai-bot       # machine state
+flyctl machine restart <id> -a tims-ai-bot
+flyctl deploy                         # redeploy after `git pull`
+flyctl secrets set BOT_TOKEN=new_one  # rotate the Telegram token
+```
+
+Notes:
+
+- Memory is `512mb`. `256mb` OOM-kills python at startup once tiktoken,
+  sqlalchemy, and openai all load. Don't shrink it without testing.
+- The volume is mounted at `/app/data`, which is where SQLite writes.
+  Snapshot retention is 5 days by default (Fly handles it).
+- Don't run `flyctl deploy` while the bot is also running locally — both
+  long-pollers will trigger `TelegramConflictError`.
+
+## Option B — Docker Compose
 
 Works on any Linux VPS with Docker installed. Survives reboots, restarts on
 crash, persists DB + logs to host volumes.
@@ -38,7 +85,7 @@ docker compose up -d --build
 The bot writes to `./data/bot.db` and `./logs/` on the host (mounted into the
 container). Back those two directories up if you care about memory persistence.
 
-## Option B — bare-metal systemd
+## Option C — bare-metal systemd
 
 For folks who prefer running Python directly.
 
