@@ -49,8 +49,51 @@ class LLMClient:
         max_tokens: int | None = None,
         response_format_json: bool = False,
     ) -> str:
+        # Try the primary model first. If it exhausts retries (typically
+        # because of a free-tier RPM/RPD cap), drop down to the lite
+        # fallback model so the user never just sees silence.
+        primary = model or self._settings.llm_model
+        fallback = self._settings.llm_model_fallback
+        models_to_try: list[str] = [primary]
+        if fallback and fallback != primary:
+            models_to_try.append(fallback)
+
+        last_exc: Exception | None = None
+        for candidate in models_to_try:
+            try:
+                return await self._chat_one(
+                    messages,
+                    model=candidate,
+                    temperature=temperature,
+                    top_p=top_p,
+                    max_tokens=max_tokens,
+                    response_format_json=response_format_json,
+                )
+            except LLMError as exc:
+                last_exc = exc
+                if candidate != models_to_try[-1]:
+                    logger.warning(
+                        "primary model %s failed (%s) \u2014 falling back to %s",
+                        candidate,
+                        exc,
+                        models_to_try[models_to_try.index(candidate) + 1],
+                    )
+                continue
+        assert last_exc is not None  # at least one attempt always runs
+        raise last_exc
+
+    async def _chat_one(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        model: str,
+        temperature: float | None,
+        top_p: float | None,
+        max_tokens: int | None,
+        response_format_json: bool,
+    ) -> str:
         params: dict[str, Any] = {
-            "model": model or self._settings.llm_model,
+            "model": model,
             "messages": messages,
             "temperature": temperature if temperature is not None else self._settings.llm_temperature,
             "top_p": top_p if top_p is not None else self._settings.llm_top_p,
@@ -69,13 +112,13 @@ class LLMClient:
                 with attempt:
                     completion = await self._client.chat.completions.create(**params)
         except APIStatusError as exc:
-            logger.error("LLM API status error: %s", exc)
+            logger.error("LLM API status error (model=%s): %s", model, exc)
             raise LLMError(str(exc)) from exc
         except _RETRYABLE as exc:
-            logger.error("LLM call failed after retries: %s", exc)
+            logger.error("LLM call failed after retries (model=%s): %s", model, exc)
             raise LLMError(str(exc)) from exc
         except Exception as exc:  # noqa: BLE001 — surface unknown errors uniformly
-            logger.exception("Unexpected LLM failure")
+            logger.exception("Unexpected LLM failure (model=%s)", model)
             raise LLMError(str(exc)) from exc
 
         choice = completion.choices[0]

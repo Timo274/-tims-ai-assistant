@@ -5,7 +5,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -26,11 +26,21 @@ class Settings(BaseSettings):
     admin_ids_raw: str = Field(default="", alias="admin_ids")
     bot_persona_name: str = "tim"
 
-    # LLM
-    llm_base_url: str = "https://api.openai.com/v1"
-    llm_model: str = "gpt-4o-mini"
-    llm_summary_model: str = "gpt-4o-mini"
-    llm_api_key: str = Field(..., min_length=8)
+    # LLM. Defaults target Google Gemini's OpenAI-compatible endpoint —
+    # `gemini-2.5-flash` is generous in the free tier (~1500 RPD) and the
+    # `*-lite` variant is the cheaper fallback we drop to when the main model
+    # rate-limits.
+    llm_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai/"
+    llm_model: str = "gemini-2.5-flash"
+    llm_model_fallback: str = "gemini-2.5-flash-lite"
+    llm_summary_model: str = "gemini-2.5-flash-lite"
+    # Accept GEMINI_API_KEY too — most users coming from aistudio.google.com
+    # will have that name in their .env.
+    llm_api_key: str = Field(
+        ...,
+        min_length=8,
+        validation_alias=AliasChoices("llm_api_key", "gemini_api_key", "openai_api_key"),
+    )
     llm_temperature: float = 0.95
     llm_top_p: float = 0.95
     llm_max_tokens: int = 400

@@ -16,7 +16,11 @@ _CASE_OPENERS = {
     "ага", "бля", "короче", "ща", "типа",
 }
 
-_BANNED_PHRASES = (
+# Phrases that immediately give away "this is a chatbot". We strip them
+# rather than letting them ship to Telegram. Each entry is matched against
+# the lower-cased reply text using a regex with word boundaries to avoid
+# false positives (e.g. "я бот" matching inside "я ботинки").
+_BANNED_PHRASES: tuple[str, ...] = (
     "as an ai language model",
     "as an ai",
     "as a language model",
@@ -33,6 +37,13 @@ _BANNED_PHRASES = (
     "is there anything else",
     "хочешь чтобы я",
     "если у тебя есть еще вопросы",
+)
+
+# Pre-compile word-boundary regexes for each banned phrase. `\b` works for
+# Cyrillic too (Python re treats letter chars as \w by default).
+_BANNED_RES: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(r"\b" + re.escape(p) + r"\b", re.IGNORECASE)
+    for p in _BANNED_PHRASES
 )
 
 _MD_BOLD_RE = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
@@ -55,15 +66,21 @@ def polish(text: str) -> str:
         if out.lower().startswith(("json", "python", "txt")):
             out = out.split("\n", 1)[-1]
 
-    # Drop bot-style framing.
-    lowered = out.lower()
-    for phrase in _BANNED_PHRASES:
-        if phrase in lowered:
-            # Try to drop the sentence containing it.
-            sentences = re.split(r"(?<=[\.\!\?])\s+", out)
-            sentences = [s for s in sentences if phrase not in s.lower()]
-            out = " ".join(sentences).strip()
-            lowered = out.lower()
+    # Drop bot-style framing. Use word-boundary regex so "я бот" doesn't
+    # match inside "я ботинки". If the phrase is in a longer message we
+    # drop the surrounding sentence; if it's the *only* content we just
+    # erase the phrase itself rather than nuking the whole reply, which is
+    # what the previous logic did silently.
+    for pattern in _BANNED_RES:
+        if not pattern.search(out):
+            continue
+        sentences = re.split(r"(?<=[\.\!\?])\s+", out)
+        kept = [s for s in sentences if not pattern.search(s)]
+        if kept:
+            out = " ".join(kept).strip()
+        else:
+            # No sentence boundaries to drop along — just delete the phrase.
+            out = pattern.sub("", out).strip()
 
     # Remove markdown decoration that doesn't render in Telegram plain text.
     out = _MD_BOLD_RE.sub(r"\1", out)

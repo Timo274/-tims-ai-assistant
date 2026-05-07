@@ -32,6 +32,64 @@ def build_message_router(
     async def on_caption(message: Message) -> None:
         await _handle(message, queue=queue, db=db, settings=settings, use_caption=True)
 
+    # Stickers, voice notes, and bare media (photo / video / animation /
+    # video_note / audio / document) all get a synthesized text
+    # representation so the LLM can react like a real person would (e.g.
+    # "хах жесть" —> sticker pack name).
+    @router.message(F.sticker)
+    async def on_sticker(message: Message) -> None:
+        s = message.sticker
+        emoji = (s.emoji if s and s.emoji else "").strip()
+        pack = (s.set_name if s and s.set_name else "").strip()
+        bits = ["[sticker]"]
+        if emoji:
+            bits.append(emoji)
+        if pack:
+            bits.append(f"({pack})")
+        await _handle(
+            message, queue=queue, db=db, settings=settings, override_text=" ".join(bits)
+        )
+
+    @router.message(F.voice)
+    async def on_voice(message: Message) -> None:
+        await _handle(
+            message, queue=queue, db=db, settings=settings, override_text="[voice message]"
+        )
+
+    @router.message(F.video_note)
+    async def on_video_note(message: Message) -> None:
+        await _handle(
+            message,
+            queue=queue,
+            db=db,
+            settings=settings,
+            override_text="[video circle]",
+        )
+
+    @router.message(F.photo)
+    async def on_photo_no_caption(message: Message) -> None:
+        if message.caption:
+            return  # already handled by on_caption
+        await _handle(
+            message, queue=queue, db=db, settings=settings, override_text="[photo]"
+        )
+
+    @router.message(F.video)
+    async def on_video_no_caption(message: Message) -> None:
+        if message.caption:
+            return
+        await _handle(
+            message, queue=queue, db=db, settings=settings, override_text="[video]"
+        )
+
+    @router.message(F.animation)
+    async def on_animation(message: Message) -> None:
+        if message.caption:
+            return
+        await _handle(
+            message, queue=queue, db=db, settings=settings, override_text="[gif]"
+        )
+
     return router
 
 
@@ -42,6 +100,7 @@ async def _handle(
     db: Database,
     settings: Settings,
     use_caption: bool = False,
+    override_text: str | None = None,
 ) -> None:
     if message.from_user is None or message.from_user.is_bot:
         return
@@ -52,7 +111,12 @@ async def _handle(
     if not is_dm and not (settings.reply_in_groups and is_group):
         return
 
-    text = message.caption if use_caption else message.text
+    if override_text is not None:
+        text = override_text
+    elif use_caption:
+        text = message.caption
+    else:
+        text = message.text
     if not text:
         return
 

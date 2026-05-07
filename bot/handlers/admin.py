@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from aiogram import Router
+from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 from sqlalchemy import func, select
@@ -177,6 +180,44 @@ def build_admin_router(*, db: Database, settings: Settings) -> Router:
             lines.append(f"- {u.id} {u.display_name}{tag}")
         await message.answer("\n".join(lines))
 
+    @router.message(Command("broadcast"))
+    async def on_broadcast(message: Message, command: CommandObject) -> None:
+        if not _is_admin(message, settings):
+            return
+        text = (command.args or "").strip()
+        if not text:
+            await message.answer("usage: /broadcast <text>")
+            return
+        async with db.session() as session:
+            repo = Repository(session)
+            users = await repo.list_users(limit=10_000)
+        targets = [u for u in users if not u.is_blocked]
+        sent = 0
+        failed = 0
+        # Telegram's global cap is ~30 msg/s. Stay well under that.
+        for u in targets:
+            try:
+                await message.bot.send_message(u.id, text, disable_web_page_preview=True)
+                sent += 1
+            except TelegramForbiddenError:
+                failed += 1
+                async with db.session() as session:
+                    repo = Repository(session)
+                    await repo.set_blocked(u.id, True)
+                    await session.commit()
+            except TelegramRetryAfter as exc:
+                await asyncio.sleep(exc.retry_after + 0.5)
+                try:
+                    await message.bot.send_message(u.id, text, disable_web_page_preview=True)
+                    sent += 1
+                except Exception:  # noqa: BLE001
+                    failed += 1
+            except Exception:  # noqa: BLE001
+                logger.exception("broadcast failed for user=%s", u.id)
+                failed += 1
+            await asyncio.sleep(0.05)  # ~20 msg/s
+        await message.answer(f"broadcast: sent={sent} failed={failed} total={len(targets)}")
+
     @router.message(Command("admin_help"))
     async def on_admin_help(message: Message) -> None:
         if not _is_admin(message, settings):
@@ -190,7 +231,8 @@ def build_admin_router(*, db: Database, settings: Settings) -> Router:
             "/memory [user_id] — show memory\n"
             "/forget <user_id> — wipe memory only\n"
             "/reset <user_id> — wipe everything\n"
-            "/block <user_id> | /unblock <user_id>"
+            "/block <user_id> | /unblock <user_id>\n"
+            "/broadcast <text> — send to all unblocked users"
         )
 
     return router
