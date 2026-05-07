@@ -5,7 +5,13 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from openai import APIError, APIStatusError, APITimeoutError, AsyncOpenAI, RateLimitError
+from openai import (
+    APIConnectionError,
+    APIStatusError,
+    AsyncOpenAI,
+    InternalServerError,
+    RateLimitError,
+)
 from tenacity import (
     AsyncRetrying,
     retry_if_exception_type,
@@ -18,10 +24,14 @@ from bot.logger import get_logger
 
 logger = get_logger(__name__)
 
+# Only retry on transient failures. Deliberately NOT including the
+# `APIError` base class — that swept in 400/401/403/404 too, which never
+# succeed on retry and just added ~7s of latency before surfacing the real
+# error. `APIConnectionError` already covers `APITimeoutError`.
 _RETRYABLE: tuple[type[BaseException], ...] = (
-    APITimeoutError,
+    APIConnectionError,
     RateLimitError,
-    APIError,
+    InternalServerError,
 )
 
 
