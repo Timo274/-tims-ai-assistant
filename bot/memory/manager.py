@@ -128,7 +128,12 @@ class MemoryManager:
                 covers_until=covers_until,
             )
             # Drop the now-summarised raw messages to keep storage bounded.
-            await repo.delete_messages_older_than(user_id, covers_until)
+            # Use `cutoff` (the boundary between old and recent) rather than
+            # `covers_until` (== max old message timestamp). The repo deletes
+            # with strict `<`, so passing `covers_until` would leave the
+            # newest already-summarised row behind every cycle and re-feed
+            # it into the next summary.
+            await repo.delete_messages_older_than(user_id, cutoff)
             await session.commit()
         logger.info(
             "user=%s summarised %d old messages into %d-char summary",
