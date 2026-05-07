@@ -1,0 +1,20 @@
+services:
+  bot:
+    build: .
+    image: tims-ai-assistant:latest
+    container_name: tims-ai-assistant
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=sqlite+aiosqlite:////app/data/bot.db
+      - LOG_DIR=/app/logs
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys, pathlib; sys.exit(0 if pathlib.Path('/app/data/bot.db').exists() else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s

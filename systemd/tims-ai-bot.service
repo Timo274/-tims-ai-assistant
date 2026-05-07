@@ -1,0 +1,29 @@
+[Unit]
+Description=tims-ai-assistant Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bot
+Group=bot
+WorkingDirectory=/opt/tims-ai-assistant
+EnvironmentFile=/opt/tims-ai-assistant/.env
+ExecStart=/opt/tims-ai-assistant/.venv/bin/python -m bot
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/tims-ai-assistant/data /opt/tims-ai-assistant/logs
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target
