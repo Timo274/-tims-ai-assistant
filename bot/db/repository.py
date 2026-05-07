@@ -6,7 +6,7 @@ from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.db.models import BotState, Memory, Message, RateLimitEvent, Summary, User
@@ -98,8 +98,8 @@ class Repository:
         return rows
 
     async def messages_count(self, user_id: int) -> int:
-        stmt = select(Message.id).where(Message.user_id == user_id)
-        return len(list((await self.session.execute(stmt)).scalars().all()))
+        stmt = select(func.count()).select_from(Message).where(Message.user_id == user_id)
+        return int((await self.session.execute(stmt)).scalar_one())
 
     async def messages_older_than(self, user_id: int, cutoff: datetime) -> list[Message]:
         stmt = (
@@ -209,11 +209,15 @@ class Repository:
 
     async def count_rate_limit_events(self, user_id: int, window_seconds: int) -> int:
         cutoff = _utcnow() - timedelta(seconds=window_seconds)
-        stmt = select(RateLimitEvent.id).where(
-            RateLimitEvent.user_id == user_id,
-            RateLimitEvent.created_at >= cutoff,
+        stmt = (
+            select(func.count())
+            .select_from(RateLimitEvent)
+            .where(
+                RateLimitEvent.user_id == user_id,
+                RateLimitEvent.created_at >= cutoff,
+            )
         )
-        return len(list((await self.session.execute(stmt)).scalars().all()))
+        return int((await self.session.execute(stmt)).scalar_one())
 
     async def purge_old_rate_limit_events(self, retention_seconds: int = 3600) -> int:
         cutoff = _utcnow() - timedelta(seconds=retention_seconds)

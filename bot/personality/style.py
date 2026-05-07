@@ -8,8 +8,13 @@ the system prompt.
 
 from __future__ import annotations
 
-import random
 import re
+
+_CASE_OPENERS = {
+    "i", "yes", "yeah", "yep", "no", "nope", "ok", "okay", "sure", "maybe",
+    "just", "so", "well", "hmm", "да", "нет", "ну", "норм", "мб", "та",
+    "ага", "бля", "короче", "ща", "типа",
+}
 
 _BANNED_PHRASES = (
     "as an ai language model",
@@ -67,36 +72,12 @@ def polish(text: str) -> str:
     out = _MD_BULLET_RE.sub("", out)
     out = _MULTI_BLANK_RE.sub("\n\n", out)
 
-    # Occasionally make it more lowercase-y to match the vibe.
-    if out and out[0].isalpha() and out[0].isupper() and random.random() < 0.7:
-        # Don't lowercase obvious proper nouns (very rough heuristic).
-        if out.split()[0].lower() not in {"i", "ok", "ngl", "lol"}:
+    # Lower-case the first letter ONLY when it's a common short sentence
+    # opener like "I", "Yes", "Ok". For anything else we leave the case alone
+    # so we don't mangle proper nouns ("Bitcoin", "Apple", "AP", "PP" etc).
+    if out and out[0].isalpha() and out[0].isupper():
+        first_word = out.split(maxsplit=1)[0].rstrip(".,!?;:")
+        if first_word.lower() in _CASE_OPENERS:
             out = out[0].lower() + out[1:]
 
     return out.strip()
-
-
-def split_into_messages(text: str, max_parts: int = 3) -> list[str]:
-    """Occasionally split a longer reply into 2-3 messages, like a real human typing."""
-    text = text.strip()
-    if not text:
-        return []
-    if len(text) < 70 or "\n" not in text and text.count(". ") < 1:
-        return [text]
-    if random.random() > 0.35:  # most replies stay as one message
-        return [text]
-
-    # Prefer splitting on blank lines, then sentence boundaries.
-    parts = [p.strip() for p in text.split("\n\n") if p.strip()]
-    if len(parts) < 2:
-        sentences = [s.strip() for s in re.split(r"(?<=[\.\!\?])\s+", text) if s.strip()]
-        if len(sentences) < 2:
-            return [text]
-        # Group sentences into 2 or 3 chunks.
-        target = min(max_parts, max(2, len(sentences) // 2))
-        chunk_size = max(1, len(sentences) // target)
-        parts = []
-        for i in range(0, len(sentences), chunk_size):
-            parts.append(" ".join(sentences[i : i + chunk_size]))
-
-    return parts[:max_parts]

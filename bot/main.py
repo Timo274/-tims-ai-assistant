@@ -9,7 +9,6 @@ from typing import Any
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
 
 from bot.config import Settings, get_settings
 from bot.db.database import Database, get_database
@@ -47,9 +46,12 @@ async def _main() -> None:
     memory = MemoryManager(db, llm, settings)
     context_builder = ContextBuilder(db, memory, personality, settings)
 
+    # Default to plain text. We don't format replies with HTML/Markdown, and
+    # any stray '<', '>' or '&' in LLM output would otherwise crash Telegram's
+    # parser and silently drop replies.
     bot = Bot(
         token=settings.bot_token,
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+        default=DefaultBotProperties(parse_mode=None),
     )
     me = await bot.get_me()
     logger.info("authenticated as @%s (id=%s)", me.username, me.id)
@@ -73,9 +75,12 @@ async def _main() -> None:
 
     dp = Dispatcher()
     # Order matters: protection first, then rate-limit, then logging.
-    dp.update.middleware(PromptProtectionMiddleware())
-    dp.update.middleware(RateLimitMiddleware(db, settings))
-    dp.update.middleware(RequestLoggingMiddleware())
+    # All three middlewares operate on Message events specifically, so they
+    # must be attached at the message router level (dp.update would deliver
+    # raw Update objects and our isinstance(Message) checks would no-op).
+    dp.message.middleware(PromptProtectionMiddleware())
+    dp.message.middleware(RateLimitMiddleware(db, settings))
+    dp.message.middleware(RequestLoggingMiddleware())
 
     dp.include_router(build_admin_router(db=db, settings=settings))
     dp.include_router(build_start_router())

@@ -15,7 +15,7 @@ from bot.config import get_settings  # noqa: E402
 from bot.llm.prompts import build_system_prompt  # noqa: E402
 from bot.middleware.prompt_protection import sanitize_user_text  # noqa: E402
 from bot.personality.engine import PersonalityEngine  # noqa: E402
-from bot.personality.style import polish, split_into_messages  # noqa: E402
+from bot.personality.style import polish  # noqa: E402
 from bot.reply.queue import MessageQueue, QueuedMessage  # noqa: E402
 from bot.utils.tokens import count_tokens  # noqa: E402
 
@@ -46,9 +46,15 @@ def test_polish_strips_chatgpt_phrases() -> None:
     assert "**" not in out
 
 
-def test_split_into_messages_keeps_short_singles() -> None:
-    parts = split_into_messages("ну да")
-    assert parts == ["ну да"]
+def test_polish_preserves_proper_nouns() -> None:
+    out = polish("Bitcoin тащит лол")
+    # We must NOT lowercase proper nouns at the start of a reply.
+    assert out.startswith("Bitcoin")
+
+
+def test_polish_lowercases_known_openers() -> None:
+    out = polish("Yeah база")
+    assert out == "yeah база" or out.startswith("yeah")
 
 
 def test_sanitize_drops_injection() -> None:

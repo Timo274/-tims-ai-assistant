@@ -75,7 +75,10 @@ class ReplyEngine:
                 await repo.add_message(user_id=user.id, role="user", content=clean)
             await session.commit()
 
-        # Build LLM context.
+        # Build LLM context. We persisted the user message above, so
+        # ContextBuilder.recent_messages() already includes the freshest user
+        # turn — do NOT append it a second time or the model sees the message
+        # twice and quality suffers.
         try:
             llm_messages, tone, memory_ids = await self._context.build(
                 user=user,
@@ -85,10 +88,6 @@ class ReplyEngine:
         except Exception:  # noqa: BLE001
             logger.exception("failed to build context for user=%s", user.id)
             return
-
-        # Append the freshest user input as the trailing user turn — but
-        # only if the persisted history doesn't already include it.
-        llm_messages.append({"role": "user", "content": sanitized_text})
 
         # Variable, pre-typing pause so the bot doesn't reply microseconds
         # after the message arrives.
