@@ -16,7 +16,7 @@ from bot.llm.client import LLMClient, LLMError
 from bot.logger import get_logger
 from bot.memory.manager import MemoryManager
 from bot.middleware.prompt_protection import sanitize_user_text
-from bot.personality.style import polish, split_into_messages
+from bot.personality.style import polish
 from bot.reply.context import ContextBuilder
 from bot.reply.queue import QueuedMessage
 from bot.utils.timing import estimate_typing_delay, sleep_jitter
@@ -112,23 +112,21 @@ class ReplyEngine:
             logger.info("empty reply for user=%s, skipping", user.id)
             return
 
-        parts = split_into_messages(reply)
+        # Telegram caps single messages at 4096 chars; with LLM_MAX_TOKENS=400
+        # we never come close, but truncate defensively anyway.
+        if len(reply) > 4000:
+            reply = reply[:4000].rstrip()
+
+        delay = estimate_typing_delay(
+            reply,
+            per_char=self._settings.typing_delay_per_char,
+            minimum=self._settings.typing_delay_min,
+            maximum=self._settings.typing_delay_max,
+        )
+        await sleep_jitter(delay)
+
         try:
-            for idx, part in enumerate(parts):
-                delay = estimate_typing_delay(
-                    part,
-                    per_char=self._settings.typing_delay_per_char,
-                    minimum=self._settings.typing_delay_min,
-                    maximum=self._settings.typing_delay_max,
-                )
-                if idx > 0:
-                    await asyncio.sleep(min(2.5, delay * 0.6))
-                    try:
-                        await self._bot.send_chat_action(chat_id, ChatAction.TYPING)
-                    except Exception:  # noqa: BLE001
-                        pass
-                await sleep_jitter(delay)
-                await self._bot.send_message(chat_id, part, disable_web_page_preview=True)
+            await self._bot.send_message(chat_id, reply, disable_web_page_preview=True)
         except TelegramForbiddenError:
             logger.info("user=%s blocked the bot", user.id)
             async with self._db.session() as session:
@@ -143,10 +141,9 @@ class ReplyEngine:
             logger.exception("failed to send reply to user=%s", user.id)
             return
 
-        full_reply = "\n\n".join(parts)
         async with self._db.session() as session:
             repo = Repository(session)
-            await repo.add_message(user_id=user.id, role="assistant", content=full_reply)
+            await repo.add_message(user_id=user.id, role="assistant", content=reply)
             await session.commit()
         await self._memory.mark_used(memory_ids)
 
@@ -154,11 +151,11 @@ class ReplyEngine:
         asyncio.create_task(self._post_reply_jobs(user.id))
 
         logger.info(
-            "replied user=%s tone=%s in_msgs=%d out_parts=%d mem=%d",
+            "replied user=%s tone=%s in_msgs=%d out_chars=%d mem=%d",
             user.id,
             tone.label,
             len(messages),
-            len(parts),
+            len(reply),
             len(memory_ids),
         )
 
