@@ -19,7 +19,11 @@ class Settings(BaseSettings):
 
     # Telegram
     bot_token: str = Field(..., min_length=20)
-    admin_ids: list[int] = Field(default_factory=list)
+    # Stored as raw CSV (e.g. "111,222") and exposed as a parsed list via the
+    # `admin_ids` property. We don't type this as `list[int]` because
+    # pydantic-settings v2 tries to JSON-decode complex env values, and a CSV
+    # like "111,222" isn't valid JSON.
+    admin_ids_raw: str = Field(default="", alias="admin_ids")
     bot_persona_name: str = "tim"
 
     # LLM
@@ -57,23 +61,27 @@ class Settings(BaseSettings):
     reply_in_groups: bool = False
 
     # ----- validators ------------------------------------------------------
-    @field_validator("admin_ids", mode="before")
-    @classmethod
-    def _parse_admin_ids(cls, value: object) -> list[int]:
-        if value in (None, "", []):
-            return []
-        if isinstance(value, list):
-            return [int(v) for v in value if str(v).strip()]
-        if isinstance(value, str):
-            return [int(part.strip()) for part in value.split(",") if part.strip()]
-        return [int(value)]  # type: ignore[arg-type]
-
     @field_validator("log_level")
     @classmethod
     def _upper(cls, v: str) -> str:
         return v.upper()
 
     # ----- helpers ---------------------------------------------------------
+    @property
+    def admin_ids(self) -> list[int]:
+        if not self.admin_ids_raw:
+            return []
+        out: list[int] = []
+        for part in self.admin_ids_raw.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                out.append(int(part))
+            except ValueError:
+                continue
+        return out
+
     @property
     def log_dir_path(self) -> Path:
         return Path(self.log_dir).expanduser().resolve()
