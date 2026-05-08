@@ -84,6 +84,7 @@ class ReplyEngine:
                 user=user,
                 incoming_text=sanitized_text,
                 is_group_chat=is_group_chat,
+                current_batch_count=len(messages),
             )
         except Exception:  # noqa: BLE001
             logger.exception("failed to build context for user=%s", user.id)

@@ -32,6 +32,7 @@ class ContextBuilder:
         user: User,
         incoming_text: str,
         is_group_chat: bool,
+        current_batch_count: int = 1,
     ) -> tuple[list[dict[str, str]], ToneProfile, list[int]]:
         """Return (messages, tone, used_memory_ids)."""
         tone = self._personality.detect_tone(incoming_text)
@@ -51,10 +52,12 @@ class ContextBuilder:
             )
             total_msgs = await repo.messages_count(user_id=user.id)
 
-        # The reply engine writes the inbound message to the DB *before*
-        # calling build(), so on a brand-new chat we'll see exactly 1 row.
-        # Anything beyond that means there is real prior history.
-        has_chat_history = total_msgs > 1
+        # The reply engine writes the inbound batch to the DB *before*
+        # calling build(), so on a brand-new chat we see exactly N rows
+        # where N is the current debounce batch size. Anything beyond
+        # that means there is real prior history (assistant turns or
+        # earlier user messages from previous interactions).
+        has_chat_history = total_msgs > max(current_batch_count, 1)
 
         owner_knowledge = await get_user_knowledge(self._db)
         incoming_language = detect_language(incoming_text)
