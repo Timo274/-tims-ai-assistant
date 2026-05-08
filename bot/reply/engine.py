@@ -46,7 +46,12 @@ class ReplyEngine:
         if not messages:
             return
         user_id = messages[0].user_id
-        is_group_chat = chat_id != user_id
+        # All messages in a batch share the same (chat_id, user_id) and so
+        # must share the same business connection (it's keyed off chat).
+        business_connection_id = messages[0].business_connection_id
+        # In business mode the chat is a 1:1 between owner and contact,
+        # so a chat_id != user_id discrepancy doesn't mean "group".
+        is_group_chat = (business_connection_id is None) and (chat_id != user_id)
 
         # Skip groups unless explicitly enabled.
         if is_group_chat and not self._settings.reply_in_groups:
@@ -95,7 +100,11 @@ class ReplyEngine:
         await sleep_jitter(random.uniform(0.4, 1.4))
 
         try:
-            await self._bot.send_chat_action(chat_id, ChatAction.TYPING)
+            await self._bot.send_chat_action(
+                chat_id,
+                ChatAction.TYPING,
+                business_connection_id=business_connection_id,
+            )
         except (TelegramForbiddenError, TelegramRetryAfter):
             return
         except Exception:  # noqa: BLE001
@@ -126,7 +135,12 @@ class ReplyEngine:
         await sleep_jitter(delay)
 
         try:
-            await self._bot.send_message(chat_id, reply, disable_web_page_preview=True)
+            await self._bot.send_message(
+                chat_id,
+                reply,
+                disable_web_page_preview=True,
+                business_connection_id=business_connection_id,
+            )
         except TelegramForbiddenError:
             logger.info("user=%s blocked the bot", user.id)
             async with self._db.session() as session:

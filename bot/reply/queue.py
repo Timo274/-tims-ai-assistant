@@ -22,6 +22,11 @@ class QueuedMessage:
     user_id: int
     message_id: int
     text: str
+    # Set when this message arrived via Telegram Business (the bot is
+    # connected to the owner's account and is replying on their behalf).
+    # The reply must be sent through the same connection so it appears
+    # to come from the owner, not from @<bot>.
+    business_connection_id: str | None = None
 
 
 @dataclass

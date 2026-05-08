@@ -314,6 +314,49 @@ def test_inline_prompt_constants_exist() -> None:
     assert len(INLINE_QUERY_PROMPT) > 100
 
 
+def test_queued_message_carries_business_connection_id() -> None:
+    """Telegram Business mode requires the same `business_connection_id`
+    on every reply for the message to be sent on the owner's behalf
+    (instead of from @<bot>). It must travel through the debounce queue
+    intact so the engine can pass it back to `Bot.send_message`."""
+    msg = QueuedMessage(
+        chat_id=123,
+        user_id=456,
+        message_id=1,
+        text="hi",
+        business_connection_id="bizconn_abc",
+    )
+    assert msg.business_connection_id == "bizconn_abc"
+    # Default for the non-business case must still be None so existing
+    # callers that don't pass the field keep working.
+    msg_default = QueuedMessage(chat_id=1, user_id=2, message_id=3, text="x")
+    assert msg_default.business_connection_id is None
+
+
+def test_business_router_registers_business_message_handlers() -> None:
+    """Wiring sanity check: build_message_router must register handlers
+    on BOTH `router.message` and `router.business_message`. If we forget
+    the second observer, business updates from Telegram silently fall
+    through and the bot looks dead in business mode (this is exactly the
+    bug we hit in production)."""
+    from bot.config import get_settings as _gs
+    from bot.db.database import get_database
+    from bot.handlers.messages import build_message_router
+    from bot.reply.queue import MessageQueue as _MQ
+
+    settings = _gs()
+    db = get_database()
+    queue = _MQ(lambda _c, _m: asyncio.sleep(0), debounce_seconds=0.1)
+    router = build_message_router(queue=queue, db=db, settings=settings)
+    # Each observer keeps a private list of registered handlers under
+    # `.handlers`. We only assert non-emptiness — exact handler count is
+    # an implementation detail of `_register_content_handlers`.
+    assert len(router.message.handlers) > 0, "regular message handlers missing"
+    assert len(router.business_message.handlers) > 0, (
+        "business_message handlers missing — Telegram Business updates would be ignored"
+    )
+
+
 def test_message_queue_debounces_and_flushes() -> None:
     received: list[list[QueuedMessage]] = []
 
