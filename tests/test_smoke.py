@@ -280,6 +280,32 @@ def test_build_system_prompt_no_policy_addendum_for_strangers() -> None:
     assert "ongoing chat" in prompt
 
 
+def test_ai_disclosure_covers_both_direct_ask_and_unknown_answer() -> None:
+    """The disclosure prompt must instruct the model to disclose AI status
+    in BOTH cases: (1) directly asked "are you a bot?", and (2) when the
+    user asks a concrete factual question about Tim that the model can't
+    answer. The previous variant just hedged "хз" — that's no longer
+    enough; the user explicitly asked for an AI disclosure on unknowns."""
+    prompt = build_system_prompt(
+        persona_name="tim",
+        user_display_name="Person",
+        is_group_chat=False,
+        detected_tone="casual",
+        long_term_summary=None,
+        relevant_memories=[],
+        contact_user_id=12345,
+        has_chat_history=False,
+        incoming_language="ru",
+        user_knowledge=None,
+    )
+    lower = prompt.lower()
+    # Case 1: directly asked.
+    assert "ты бот" in lower or "are you a bot" in lower
+    # Case 2: concrete unknown question → disclose, not just hedge.
+    assert "concrete question" in lower or "concrete_question" in lower or "concrete" in lower
+    assert "тим уточнит" in lower or "тим напишет" in lower or "tim's ai assistant" in lower
+
+
 def test_inline_prompt_constants_exist() -> None:
     # Inline prompt must be a non-empty system prompt — it's used as-is
     # (no .format() with placeholders) by the inline handler.
