@@ -6,9 +6,11 @@ from bot.config import Settings
 from bot.db.database import Database
 from bot.db.models import User
 from bot.db.repository import Repository
+from bot.knowledge.questionnaire import get_user_knowledge
 from bot.llm.prompts import build_system_prompt
 from bot.memory.manager import MemoryManager
 from bot.personality.engine import PersonalityEngine, ToneProfile
+from bot.utils.lang import detect_language
 
 
 class ContextBuilder:
@@ -47,6 +49,15 @@ class ContextBuilder:
                 user_id=user.id,
                 limit=self._settings.context_recent_messages,
             )
+            total_msgs = await repo.messages_count(user_id=user.id)
+
+        # The reply engine writes the inbound message to the DB *before*
+        # calling build(), so on a brand-new chat we'll see exactly 1 row.
+        # Anything beyond that means there is real prior history.
+        has_chat_history = total_msgs > 1
+
+        owner_knowledge = await get_user_knowledge(self._db)
+        incoming_language = detect_language(incoming_text)
 
         system_prompt = build_system_prompt(
             persona_name=self._settings.bot_persona_name,
@@ -55,6 +66,10 @@ class ContextBuilder:
             detected_tone=tone.hint,
             long_term_summary=summary.content if summary else None,
             relevant_memories=memory_lines,
+            contact_user_id=user.id,
+            has_chat_history=has_chat_history,
+            incoming_language=incoming_language,
+            user_knowledge=owner_knowledge,
         )
 
         messages: list[dict[str, str]] = [{"role": "system", "content": system_prompt}]

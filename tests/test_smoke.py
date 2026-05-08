@@ -12,11 +12,17 @@ os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
 import asyncio  # noqa: E402
 
 from bot.config import get_settings  # noqa: E402
-from bot.llm.prompts import build_system_prompt  # noqa: E402
+from bot.llm.prompts import INLINE_QUERY_PROMPT, build_system_prompt  # noqa: E402
 from bot.middleware.prompt_protection import sanitize_user_text  # noqa: E402
+from bot.persona.contact_policy import (  # noqa: E402
+    is_cute_allowed,
+    is_love_allowed,
+    is_profanity_allowed,
+)
 from bot.personality.engine import PersonalityEngine  # noqa: E402
 from bot.personality.style import polish  # noqa: E402
 from bot.reply.queue import MessageQueue, QueuedMessage  # noqa: E402
+from bot.utils.lang import detect_language  # noqa: E402
 from bot.utils.tokens import count_tokens  # noqa: E402
 
 
@@ -159,6 +165,127 @@ def test_llm_client_falls_back_on_primary_error() -> None:
     out = asyncio.run(client.chat([{"role": "user", "content": "hey"}]))
     assert out == "fallback worked"
     assert calls == [settings.llm_model, settings.llm_model_fallback]
+
+
+def test_contact_policy_allowlists_are_disjoint_to_strangers() -> None:
+    # Default behaviour: random user_id (or None) gets the clean baseline.
+    assert is_profanity_allowed(None) is False
+    assert is_profanity_allowed(1) is False
+    assert is_love_allowed(None) is False
+    assert is_love_allowed(1) is False
+    assert is_cute_allowed(1) is False
+
+
+def test_contact_policy_allowlists_lift_for_specific_users() -> None:
+    # Hardcoded whitelist from the user's directive.
+    assert is_profanity_allowed(955745087) is True
+    assert is_love_allowed(1120864152) is True
+    assert is_cute_allowed(1120864152) is True
+    # Cross-checks: profanity user does NOT get love bucket, etc.
+    assert is_love_allowed(955745087) is False
+    assert is_profanity_allowed(1120864152) is False
+
+
+def test_polish_strips_profanity_for_strangers() -> None:
+    out = polish("ну бля норм идея", contact_id=12345)
+    assert "бля" not in out.lower()
+
+
+def test_polish_keeps_profanity_for_whitelisted_user() -> None:
+    out = polish("ну бля норм идея", contact_id=955745087)
+    assert "бля" in out.lower()
+
+
+def test_polish_strips_love_for_strangers() -> None:
+    out = polish("люблю тебя бро", contact_id=12345)
+    # The whole sentence carrying the banned token is dropped.
+    assert "люблю" not in out.lower()
+
+
+def test_polish_keeps_love_for_partner() -> None:
+    out = polish("люблю тебя", contact_id=1120864152)
+    assert "люблю" in out.lower()
+
+
+def test_polish_strips_cute_for_strangers() -> None:
+    out = polish("привет малыш", contact_id=12345)
+    assert "малыш" not in out.lower()
+
+
+def test_polish_keeps_cute_for_partner() -> None:
+    out = polish("привет малыш", contact_id=1120864152)
+    assert "малыш" in out.lower()
+
+
+def test_detect_language_russian() -> None:
+    assert detect_language("привет как дела") == "ru"
+
+
+def test_detect_language_ukrainian_via_iiyeg() -> None:
+    assert detect_language("привіт, як справи?") == "uk"
+    assert detect_language("дякую, все ок") == "uk"
+
+
+def test_detect_language_english() -> None:
+    assert detect_language("hi how are you doing today") == "en"
+
+
+def test_detect_language_empty_or_unknown() -> None:
+    assert detect_language("") is None
+    assert detect_language("123 !!!") is None
+
+
+def test_build_system_prompt_threads_new_kwargs() -> None:
+    prompt = build_system_prompt(
+        persona_name="tim",
+        user_display_name="Recruiter",
+        is_group_chat=False,
+        detected_tone="formal",
+        long_term_summary=None,
+        relevant_memories=[],
+        contact_user_id=955745087,
+        has_chat_history=False,
+        incoming_language="uk",
+        user_knowledge="Я родом из Киева, учусь на финансах.",
+    )
+    # Persona always present.
+    assert "tim" in prompt
+    # Variant-B AI disclosure block always present.
+    assert "AI-DISCLOSURE" in prompt
+    # Profanity policy lifted only for the whitelisted contact above.
+    assert "мат разрешён" in prompt.lower() or "разрешён" in prompt.lower()
+    # New-chat language hint should be present.
+    assert "uk" in prompt
+    assert "new chat" in prompt
+    # Owner knowledge slot must be injected verbatim.
+    assert "Киева" in prompt
+
+
+def test_build_system_prompt_no_policy_addendum_for_strangers() -> None:
+    prompt = build_system_prompt(
+        persona_name="tim",
+        user_display_name="Stranger",
+        is_group_chat=False,
+        detected_tone="casual",
+        long_term_summary=None,
+        relevant_memories=[],
+        contact_user_id=99999999,
+        has_chat_history=True,
+        incoming_language="ru",
+        user_knowledge=None,
+    )
+    # No profanity / love / cute lift for unknown contacts.
+    assert "мат разрешён" not in prompt.lower()
+    assert "любовные слова разрешены" not in prompt.lower()
+    assert "ongoing chat" in prompt
+
+
+def test_inline_prompt_constants_exist() -> None:
+    # Inline prompt must be a non-empty system prompt — it's used as-is
+    # (no .format() with placeholders) by the inline handler.
+    assert isinstance(INLINE_QUERY_PROMPT, str)
+    assert "{" not in INLINE_QUERY_PROMPT  # no leftover .format placeholders
+    assert len(INLINE_QUERY_PROMPT) > 100
 
 
 def test_message_queue_debounces_and_flushes() -> None:

@@ -26,14 +26,18 @@ class Settings(BaseSettings):
     admin_ids_raw: str = Field(default="", alias="admin_ids")
     bot_persona_name: str = "tim"
 
-    # LLM. Defaults target Google Gemini's OpenAI-compatible endpoint —
-    # `gemini-2.5-flash` is generous in the free tier (~1500 RPD) and the
-    # `*-lite` variant is the cheaper fallback we drop to when the main model
-    # rate-limits.
+    # LLM. Defaults target Google Gemini's OpenAI-compatible endpoint.
+    # `gemini-3.1-flash-lite` is the lite variant of the Gemini 3 series —
+    # cheap, fast, and has a much higher free-tier quota than the heavier
+    # flash models. The user explicitly asked for *only* this model so we
+    # never hit the lower flash quota and stop replying. The fallback is
+    # `gemini-2.5-flash-lite` (the previous lite model) used only if the new
+    # 3.1 model is temporarily unreachable. Both are lite; we deliberately
+    # never escalate to a heavier flash/pro tier.
     llm_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai/"
-    llm_model: str = "gemini-2.5-flash"
+    llm_model: str = "gemini-3.1-flash-lite"
     llm_model_fallback: str = "gemini-2.5-flash-lite"
-    llm_summary_model: str = "gemini-2.5-flash-lite"
+    llm_summary_model: str = "gemini-3.1-flash-lite"
     # Accept GEMINI_API_KEY too — most users coming from aistudio.google.com
     # will have that name in their .env.
     llm_api_key: str = Field(

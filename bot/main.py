@@ -13,7 +13,12 @@ from aiogram.client.default import DefaultBotProperties
 from bot.config import Settings, get_settings
 from bot.db.database import Database, get_database
 from bot.db.repository import Repository
-from bot.handlers import build_admin_router, build_message_router, build_start_router
+from bot.handlers import (
+    build_admin_router,
+    build_inline_router,
+    build_message_router,
+    build_start_router,
+)
 from bot.llm.client import LLMClient, get_llm_client
 from bot.logger import configure_logging, get_logger
 from bot.memory.manager import MemoryManager
@@ -84,6 +89,7 @@ async def _main() -> None:
 
     dp.include_router(build_admin_router(db=db, settings=settings))
     dp.include_router(build_start_router())
+    dp.include_router(build_inline_router(llm=llm))
     dp.include_router(build_message_router(queue=queue, db=db, settings=settings))
 
     stop_event = asyncio.Event()

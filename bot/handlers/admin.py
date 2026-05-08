@@ -7,13 +7,18 @@ import asyncio
 from aiogram import Router
 from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
 from aiogram.filters import Command, CommandObject
-from aiogram.types import Message
+from aiogram.types import BufferedInputFile, Message
 from sqlalchemy import func, select
 
 from bot.config import Settings
 from bot.db.database import Database
 from bot.db.models import Memory, Message as DbMessage, Summary, User
 from bot.db.repository import Repository
+from bot.knowledge.questionnaire import (
+    format_questions_for_user,
+    get_user_knowledge,
+    set_user_knowledge,
+)
 from bot.logger import get_logger
 
 logger = get_logger(__name__)
@@ -218,6 +223,63 @@ def build_admin_router(*, db: Database, settings: Settings) -> Router:
             await asyncio.sleep(0.05)  # ~20 msg/s
         await message.answer(f"broadcast: sent={sent} failed={failed} total={len(targets)}")
 
+    @router.message(Command("get_questions"))
+    async def on_get_questions(message: Message) -> None:
+        if not _is_admin(message, settings):
+            return
+        text = format_questions_for_user()
+        # Send as a .txt file so it survives Telegram's 4096-char message
+        # limit cleanly. The owner fills it in any tool and posts back via
+        # /set_knowledge <multiline>.
+        await message.answer_document(
+            BufferedInputFile(text.encode("utf-8"), filename="questionnaire.txt"),
+            caption=(
+                "анкета внутри. заполни и пришли обратно командой "
+                "`/set_knowledge` затем твой текст одним сообщением "
+                "(можно длинным)."
+            ),
+        )
+
+    @router.message(Command("set_knowledge"))
+    async def on_set_knowledge(message: Message, command: CommandObject) -> None:
+        if not _is_admin(message, settings):
+            return
+        text = (command.args or "").strip()
+        # Allow multi-line content sent as a reply to a previous message
+        # (e.g. the questionnaire .txt) — telegram will pass the visible
+        # text via `command.args`, but if empty fall back to message text
+        # minus the leading `/set_knowledge`.
+        if not text and message.text:
+            stripped = message.text.split(None, 1)
+            text = stripped[1].strip() if len(stripped) > 1 else ""
+        if not text:
+            await message.answer(
+                "usage: /set_knowledge <всё что хочешь чтобы бот знал о тебе>"
+            )
+            return
+        await set_user_knowledge(db, text)
+        await message.answer(
+            f"знания сохранены ({len(text)} симв). бот теперь будет это учитывать."
+        )
+
+    @router.message(Command("show_knowledge"))
+    async def on_show_knowledge(message: Message) -> None:
+        if not _is_admin(message, settings):
+            return
+        text = await get_user_knowledge(db)
+        if not text:
+            await message.answer("знания пока пустые. дёрни /get_questions, потом /set_knowledge.")
+            return
+        for piece in _split_for_telegram(f"current knowledge ({len(text)} chars):\n\n{text}"):
+            await message.answer(piece)
+
+    @router.message(Command("clear_knowledge"))
+    async def on_clear_knowledge(message: Message) -> None:
+        if not _is_admin(message, settings):
+            return
+        await set_user_knowledge(db, "")
+        await message.answer("знания очищены.")
+
     @router.message(Command("admin_help"))
     async def on_admin_help(message: Message) -> None:
         if not _is_admin(message, settings):
@@ -232,7 +294,11 @@ def build_admin_router(*, db: Database, settings: Settings) -> Router:
             "/forget <user_id> — wipe memory only\n"
             "/reset <user_id> — wipe everything\n"
             "/block <user_id> | /unblock <user_id>\n"
-            "/broadcast <text> — send to all unblocked users"
+            "/broadcast <text> — send to all unblocked users\n"
+            "/get_questions — анкета о тебе (отправит .txt)\n"
+            "/set_knowledge <text> — сохранить твои ответы\n"
+            "/show_knowledge — показать что сохранено\n"
+            "/clear_knowledge — очистить"
         )
 
     return router

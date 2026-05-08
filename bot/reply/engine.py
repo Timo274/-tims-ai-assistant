@@ -106,7 +106,7 @@ class ReplyEngine:
             logger.error("LLM failed for user=%s: %s", user.id, exc)
             return
 
-        reply = polish(raw)
+        reply = polish(raw, contact_id=user.id)
         if not reply:
             logger.info("empty reply for user=%s, skipping", user.id)
             return
