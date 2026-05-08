@@ -153,7 +153,10 @@ class LLMClient:
                 response_format_json=True,
             )
         except LLMError:
-            text = await self.chat(messages, model=model, temperature=temperature)
+            try:
+                text = await self.chat(messages, model=model, temperature=temperature)
+            except LLMError:
+                return None
 
         text = text.strip()
         if text.startswith("```"):
