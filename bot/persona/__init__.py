@@ -8,26 +8,34 @@ adapt tone per contact without leaking any actual conversation content.
 """
 
 from bot.persona.contact_policy import (
+    CONTACT_NAMES,
     CUTE_ALLOWED_USER_IDS,
     DISCLOSE_AI_USER_IDS,
     LOVE_ALLOWED_USER_IDS,
+    NEVER_REPLY_USER_IDS,
     PROFANITY_ALLOWED_USER_IDS,
+    get_contact_name,
     is_cute_allowed,
     is_disclose_ai,
     is_love_allowed,
+    is_never_reply,
     is_profanity_allowed,
 )
 from bot.persona.contact_styles import ContactStyle, lookup_style
 
 __all__ = [
+    "CONTACT_NAMES",
     "CUTE_ALLOWED_USER_IDS",
     "DISCLOSE_AI_USER_IDS",
     "LOVE_ALLOWED_USER_IDS",
+    "NEVER_REPLY_USER_IDS",
     "PROFANITY_ALLOWED_USER_IDS",
     "ContactStyle",
+    "get_contact_name",
     "is_cute_allowed",
     "is_disclose_ai",
     "is_love_allowed",
+    "is_never_reply",
     "is_profanity_allowed",
     "lookup_style",
 ]

@@ -16,6 +16,7 @@ from bot.llm.client import LLMClient, LLMError
 from bot.logger import get_logger
 from bot.memory.manager import MemoryManager
 from bot.middleware.prompt_protection import sanitize_user_text
+from bot.persona.contact_policy import is_never_reply
 from bot.personality.style import polish
 from bot.reply.context import ContextBuilder
 from bot.reply.queue import QueuedMessage
@@ -55,6 +56,12 @@ class ReplyEngine:
 
         # Skip groups unless explicitly enabled.
         if is_group_chat and not self._settings.reply_in_groups:
+            return
+
+        # Hard never-reply list (e.g. owner's mother). We bail BEFORE
+        # touching the DB / LLM / typing indicator so nothing leaks.
+        if is_never_reply(user_id):
+            logger.info("never-reply contact user=%s, skipping batch", user_id)
             return
 
         # Load user + persistence state.

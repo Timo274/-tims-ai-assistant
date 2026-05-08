@@ -5,6 +5,7 @@ from __future__ import annotations
 from textwrap import dedent
 
 from bot.persona.contact_policy import (
+    get_contact_name,
     is_cute_allowed,
     is_love_allowed,
     is_profanity_allowed,
@@ -313,11 +314,20 @@ def build_system_prompt(
     ]
 
     chat_state = "ongoing chat (history exists)" if has_chat_history else "new chat (no prior history)"
+    contact_label = get_contact_name(contact_user_id)
+    # The display name comes from Telegram (could be a nickname / emoji).
+    # When we have a known label we prefix it so the LLM treats the contact
+    # as "Соня (девушка)" not just "𝖕𝖚𝖕𝖘 ❤️".
+    who_line = (
+        f"- you are chatting with: {contact_label} — telegram name: {user_display_name}"
+        if contact_label
+        else f"- you are chatting with: {user_display_name}"
+    )
     chunks.append(
         dedent(
             f"""
             CURRENT CONTEXT:
-            - you are chatting with: {user_display_name}
+            {who_line}
             - chat type: {'group' if is_group_chat else 'direct (1:1)'}
             - chat state: {chat_state}
             - their detected tone: {detected_tone}

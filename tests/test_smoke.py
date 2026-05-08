@@ -15,8 +15,11 @@ from bot.config import get_settings  # noqa: E402
 from bot.llm.prompts import INLINE_QUERY_PROMPT, build_system_prompt  # noqa: E402
 from bot.middleware.prompt_protection import sanitize_user_text  # noqa: E402
 from bot.persona.contact_policy import (  # noqa: E402
+    NEVER_REPLY_USER_IDS,
+    get_contact_name,
     is_cute_allowed,
     is_love_allowed,
+    is_never_reply,
     is_profanity_allowed,
 )
 from bot.personality.engine import PersonalityEngine  # noqa: E402
@@ -410,6 +413,96 @@ def test_business_router_registers_business_message_handlers() -> None:
     assert len(router.business_message.handlers) > 0, (
         "business_message handlers missing — Telegram Business updates would be ignored"
     )
+
+
+def test_never_reply_blocks_designated_contact() -> None:
+    """Owner-designated do-not-reply contacts (e.g. mom, account 689177445)
+    must be hard-blocked at the policy layer. Hard-coding them in
+    NEVER_REPLY_USER_IDS guarantees the bot bails before any DB / LLM /
+    typing-indicator call, independent of any /block command state in the
+    DB. Strangers and the partner / best friend must NOT be in this set."""
+    assert is_never_reply(689177445) is True
+    assert 689177445 in NEVER_REPLY_USER_IDS
+    assert is_never_reply(None) is False
+    assert is_never_reply(0) is False
+    # Must not collide with the partner / best friend whitelists.
+    assert is_never_reply(1120864152) is False
+    assert is_never_reply(955745087) is False
+
+
+def test_engine_skips_never_reply_contact_before_db() -> None:
+    """The reply engine must early-return for never-reply contacts BEFORE
+    touching the DB / LLM / typing indicator — checked here by static
+    inspection of `handle_batch` so the guard never silently regresses
+    behind a refactor that reorders the steps."""
+    import inspect
+
+    from bot.reply.engine import ReplyEngine
+
+    src = inspect.getsource(ReplyEngine.handle_batch)
+    # The is_never_reply check must appear, AND it must appear before
+    # the first `self._db.session()` line (which loads the user row).
+    assert "is_never_reply(" in src, "engine missing never-reply guard"
+    guard_idx = src.index("is_never_reply(")
+    db_idx = src.index("self._db.session()")
+    assert guard_idx < db_idx, (
+        "is_never_reply check must run before the first DB session in handle_batch"
+    )
+
+
+def test_known_contact_label_threaded_into_system_prompt() -> None:
+    """For known contacts (Соня = 1120864152, Рома = 955745087) the
+    system prompt must surface the friendly label so the LLM treats them
+    as the right person regardless of their Telegram display_name (which
+    can be a nickname / emoji string). For unknown contacts no label is
+    injected — only the raw display_name is shown."""
+    sonya_prompt = build_system_prompt(
+        persona_name="tim",
+        user_display_name="𝖕𝖚𝖕𝖘 ❤️",
+        is_group_chat=False,
+        detected_tone="casual",
+        long_term_summary=None,
+        relevant_memories=[],
+        contact_user_id=1120864152,
+        has_chat_history=True,
+        incoming_language="ru",
+        user_knowledge=None,
+    )
+    assert get_contact_name(1120864152) is not None
+    assert "Соня" in sonya_prompt
+    assert "девушка" in sonya_prompt.lower()
+
+    roma_prompt = build_system_prompt(
+        persona_name="tim",
+        user_display_name="@romaarmor",
+        is_group_chat=False,
+        detected_tone="casual",
+        long_term_summary=None,
+        relevant_memories=[],
+        contact_user_id=955745087,
+        has_chat_history=True,
+        incoming_language="ru",
+        user_knowledge=None,
+    )
+    assert "Рома" in roma_prompt
+    assert "друг" in roma_prompt.lower()
+
+    stranger_prompt = build_system_prompt(
+        persona_name="tim",
+        user_display_name="Anna",
+        is_group_chat=False,
+        detected_tone="casual",
+        long_term_summary=None,
+        relevant_memories=[],
+        contact_user_id=42,
+        has_chat_history=False,
+        incoming_language="ru",
+        user_knowledge=None,
+    )
+    assert get_contact_name(42) is None
+    # Strangers don't get an injected label — the prompt should just
+    # carry their raw display_name.
+    assert "Anna" in stranger_prompt
 
 
 def test_message_queue_debounces_and_flushes() -> None:

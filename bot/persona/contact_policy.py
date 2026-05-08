@@ -38,6 +38,27 @@ CUTE_ALLOWED_USER_IDS: frozenset[int] = frozenset({
 DISCLOSE_AI_USER_IDS: frozenset[int] = frozenset()
 
 
+# Hard never-reply list. The bot must not produce ANY reply (no text, no
+# typing indicator, no LLM call) for messages from these contacts. Used
+# for relatives / accounts the owner explicitly wants to stay out of —
+# e.g. the owner's mother. Distinct from the dynamic /block command,
+# which can be flipped at runtime: this list is checked even before the
+# DB lookup so it's tamper-proof from prompt injection or DB writes.
+NEVER_REPLY_USER_IDS: frozenset[int] = frozenset({
+    689177445,   # owner-designated do-not-autoreply contact
+})
+
+
+# Known named contacts: Telegram user_id -> short label injected into
+# the system prompt so the LLM knows who it's talking to. Keep these
+# minimal — they should be at most a couple of words ("Соня (девушка)",
+# "Рома (лучший друг)"). Anything richer belongs in /set_knowledge.
+CONTACT_NAMES: dict[int, str] = {
+    1120864152: "Соня (девушка, отношения 10+ месяцев)",
+    955745087: "Рома (лучший друг, дружат 2+ года)",
+}
+
+
 def is_profanity_allowed(user_id: int | None) -> bool:
     return user_id is not None and user_id in PROFANITY_ALLOWED_USER_IDS
 
@@ -52,3 +73,13 @@ def is_cute_allowed(user_id: int | None) -> bool:
 
 def is_disclose_ai(user_id: int | None) -> bool:
     return user_id is not None and user_id in DISCLOSE_AI_USER_IDS
+
+
+def is_never_reply(user_id: int | None) -> bool:
+    return user_id is not None and user_id in NEVER_REPLY_USER_IDS
+
+
+def get_contact_name(user_id: int | None) -> str | None:
+    if user_id is None:
+        return None
+    return CONTACT_NAMES.get(user_id)
