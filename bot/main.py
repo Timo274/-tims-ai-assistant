@@ -83,9 +83,17 @@ async def _main() -> None:
     # All three middlewares operate on Message events specifically, so they
     # must be attached at the message router level (dp.update would deliver
     # raw Update objects and our isinstance(Message) checks would no-op).
-    dp.message.middleware(PromptProtectionMiddleware())
-    dp.message.middleware(RateLimitMiddleware(db, settings))
-    dp.message.middleware(RequestLoggingMiddleware())
+    #
+    # IMPORTANT: dp.message and dp.business_message are *independent*
+    # observers in aiogram v3 — they do NOT share middleware. We register
+    # the same chain on both so Telegram-Business contacts get the same
+    # rate-limit / prompt-protection / logging treatment as DM contacts.
+    # Forgetting business_message would mean unlimited LLM calls per
+    # contact in business mode (no throttle).
+    for observer in (dp.message, dp.business_message):
+        observer.middleware(PromptProtectionMiddleware())
+        observer.middleware(RateLimitMiddleware(db, settings))
+        observer.middleware(RequestLoggingMiddleware())
 
     dp.include_router(build_admin_router(db=db, settings=settings))
     dp.include_router(build_start_router())

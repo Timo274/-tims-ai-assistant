@@ -306,6 +306,61 @@ def test_ai_disclosure_covers_both_direct_ask_and_unknown_answer() -> None:
     assert "тим уточнит" in lower or "тим напишет" in lower or "tim's ai assistant" in lower
 
 
+def test_topic_taboo_blocks_crypto_and_markets_for_everyone() -> None:
+    """Per the owner's directive ("контекст криптана он ни с кем не
+    использовал"), the bot must NOT volunteer crypto/markets and must
+    deflect concrete questions on these topics — for ANY contact, not
+    just strangers. The taboo block must be present in every system
+    prompt, regardless of contact_user_id, and it must explicitly cover
+    both crypto and markets vocabulary so the model has clear guidance."""
+    for cid in (None, 12345, 955745087, 1120864152):
+        prompt = build_system_prompt(
+            persona_name="tim",
+            user_display_name="Person",
+            is_group_chat=False,
+            detected_tone="casual",
+            long_term_summary=None,
+            relevant_memories=[],
+            contact_user_id=cid,
+            has_chat_history=False,
+            incoming_language="ru",
+            user_knowledge=None,
+        )
+        lower = prompt.lower()
+        assert "topic taboo" in lower, f"taboo block missing for contact {cid}"
+        assert "крипт" in lower, f"crypto vocab missing for contact {cid}"
+        assert "рынки" in lower or "markets" in lower, (
+            f"markets vocab missing for contact {cid}"
+        )
+        # Critically: the persona's old "give opinion as a chatter on money"
+        # nudge must be gone from STYLE_RULES — otherwise the model would
+        # get conflicting orders. We just ensure the deflection phrasing
+        # is offered as an example.
+        assert (
+            "не хочу" in lower
+            or "лень обсуждать" in lower
+            or "no take" in lower
+        )
+
+
+def test_persona_base_does_not_advertise_crypto_in_backstory() -> None:
+    """The default backstory used to brag about crypto/markets, which
+    leaks the taboo topic into every reply. Owner's directive: that
+    context must not be used with anyone, so PERSONA_BASE itself must
+    be neutral on crypto/markets — the persona is still 'tim' but his
+    autoreply identity doesn't volunteer those subjects."""
+    from bot.llm.prompts import PERSONA_BASE
+
+    lower = PERSONA_BASE.lower()
+    # Key crypto/markets vocabulary must be absent from the default
+    # persona description.
+    for banned in ("крипте", "крипту", "минты", "wl", "magiceden",
+                   "opensea", "on-chain", "etf", "маркеты", "рынками"):
+        assert banned not in lower, (
+            f"PERSONA_BASE leaks taboo topic: contains '{banned}'"
+        )
+
+
 def test_inline_prompt_constants_exist() -> None:
     # Inline prompt must be a non-empty system prompt — it's used as-is
     # (no .format() with placeholders) by the inline handler.
