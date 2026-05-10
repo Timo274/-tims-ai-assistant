@@ -27,16 +27,19 @@ class Settings(BaseSettings):
     bot_persona_name: str = "tim"
 
     # LLM. Defaults target Google Gemini's OpenAI-compatible endpoint.
-    # `gemini-3.1-flash-lite` is the lite variant of the Gemini 3 series —
-    # cheap, fast, and has a much higher free-tier quota than the heavier
-    # flash models. The user explicitly asked for *only* this model so we
-    # never hit the lower flash quota and stop replying. The fallback is
-    # `gemini-2.5-flash-lite` (the previous lite model) used only if the new
-    # 3.1 model is temporarily unreachable. Both are lite; we deliberately
-    # never escalate to a heavier flash/pro tier.
+    # `gemini-3.1-flash-lite` is the primary because it has the largest
+    # free-tier quota (15 RPM / 500 RPD) of the models on this account.
+    # `llm_model_fallbacks` is a CSV chain that the client walks left
+    # → right when the primary returns a transient error (rate limit /
+    # 5xx / connection): each model in the chain is independent free-tier
+    # quota, so when 3.1 Flash Lite hits its RPD cap the bot keeps replying
+    # via 3 Flash, then 2.5 Flash, and finally 2.5 Flash Lite. Order is
+    # deliberate: heavier-but-rarer-quota models (5 RPM) come before the
+    # other lite (10 RPM but tiny 20 RPD daily cap) so we don't burn the
+    # last lite slot before we have to.
     llm_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai/"
     llm_model: str = "gemini-3.1-flash-lite"
-    llm_model_fallback: str = "gemini-2.5-flash-lite"
+    llm_model_fallbacks: str = "gemini-3-flash,gemini-2.5-flash,gemini-2.5-flash-lite"
     llm_summary_model: str = "gemini-3.1-flash-lite"
     # Accept GEMINI_API_KEY too — most users coming from aistudio.google.com
     # will have that name in their .env.
@@ -81,6 +84,19 @@ class Settings(BaseSettings):
         return v.upper()
 
     # ----- helpers ---------------------------------------------------------
+    @property
+    def llm_model_chain(self) -> list[str]:
+        """Ordered model chain: primary first, then each fallback in CSV
+        order. Empty entries / duplicates are dropped. The client walks
+        this list on every chat() call and stops at the first model that
+        returns successfully."""
+        chain: list[str] = [self.llm_model]
+        for raw in self.llm_model_fallbacks.split(","):
+            m = raw.strip()
+            if m and m not in chain:
+                chain.append(m)
+        return chain
+
     @property
     def admin_ids(self) -> list[int]:
         if not self.admin_ids_raw:

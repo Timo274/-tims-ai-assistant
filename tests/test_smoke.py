@@ -118,8 +118,13 @@ def test_config_defaults_to_gemini() -> None:
         admin_ids="0",
     )
     assert "gemini" in fresh.llm_model.lower()
-    assert fresh.llm_model_fallback
-    assert fresh.llm_model_fallback != fresh.llm_model
+    # The fallback chain must (a) start with the primary, (b) contain at
+    # least one *additional* model so we have somewhere to go when the
+    # primary's free-tier quota runs out, and (c) be free of duplicates.
+    chain = fresh.llm_model_chain
+    assert chain[0] == fresh.llm_model
+    assert len(chain) >= 2
+    assert len(chain) == len(set(chain))
     assert "generativelanguage.googleapis.com" in fresh.llm_base_url
 
 
@@ -140,9 +145,9 @@ def test_config_accepts_gemini_api_key_alias(monkeypatch) -> None:
 
 
 def test_llm_client_falls_back_on_primary_error() -> None:
-    # Verify the fallback wrapper actually retries on the lite model when
-    # the primary raises LLMError. We don't hit the network — we monkey
-    # the inner _chat_one method.
+    # Verify the fallback wrapper actually retries the next model in the
+    # chain when the primary raises LLMError. We don't hit the network
+    # — we monkey the inner _chat_one method.
     from bot import config as config_mod
     from bot.llm.client import LLMClient, LLMError
 
@@ -167,7 +172,81 @@ def test_llm_client_falls_back_on_primary_error() -> None:
 
     out = asyncio.run(client.chat([{"role": "user", "content": "hey"}]))
     assert out == "fallback worked"
-    assert calls == [settings.llm_model, settings.llm_model_fallback]
+    # First call hits the primary, second hits the next-in-chain fallback.
+    assert calls[0] == settings.llm_model
+    assert calls[1] == settings.llm_model_chain[1]
+
+
+def test_llm_client_walks_full_chain_when_all_but_last_fail() -> None:
+    # When *every* free-tier-quota'd model in the chain has failed today
+    # except the very last one, the client must still surface a reply
+    # rather than giving up after the second model. Regression guard for
+    # the previous primary+single-fallback behaviour.
+    from bot import config as config_mod
+    from bot.llm.client import LLMClient, LLMError
+
+    settings = config_mod.Settings(  # type: ignore[call-arg]
+        _env_file=None,
+        bot_token="0:" + "x" * 32,
+        llm_api_key="x" * 16,
+        admin_ids="0",
+    )
+    chain = settings.llm_model_chain
+    assert len(chain) >= 3, "this test only makes sense with a 3+ model chain"
+
+    client = LLMClient.__new__(LLMClient)
+    client._settings = settings  # type: ignore[attr-defined]
+
+    calls: list[str] = []
+
+    async def fake_chat_one(messages, *, model, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append(model)
+        if model != chain[-1]:
+            raise LLMError("simulated 429")
+        return "last-resort worked"
+
+    client._chat_one = fake_chat_one  # type: ignore[method-assign]
+
+    out = asyncio.run(client.chat([{"role": "user", "content": "hey"}]))
+    assert out == "last-resort worked"
+    # Every model in the chain must have been attempted, in order.
+    assert calls == chain
+
+
+def test_llm_client_explicit_model_does_not_use_chain() -> None:
+    # Summarisation / extraction calls pass an explicit model=. We must
+    # respect that and NOT silently fall through the user-facing chain
+    # — those calls are intentional pinned-model calls.
+    from bot import config as config_mod
+    from bot.llm.client import LLMClient, LLMError
+
+    settings = config_mod.Settings(  # type: ignore[call-arg]
+        _env_file=None,
+        bot_token="0:" + "x" * 32,
+        llm_api_key="x" * 16,
+        admin_ids="0",
+    )
+    client = LLMClient.__new__(LLMClient)
+    client._settings = settings  # type: ignore[attr-defined]
+
+    calls: list[str] = []
+
+    async def fake_chat_one(messages, *, model, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append(model)
+        raise LLMError("always fails")
+
+    client._chat_one = fake_chat_one  # type: ignore[method-assign]
+
+    try:
+        asyncio.run(
+            client.chat(
+                [{"role": "user", "content": "hey"}],
+                model="some-explicit-model",
+            )
+        )
+    except LLMError:
+        pass
+    assert calls == ["some-explicit-model"]
 
 
 def test_contact_policy_allowlists_are_disjoint_to_strangers() -> None:

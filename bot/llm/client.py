@@ -59,17 +59,19 @@ class LLMClient:
         max_tokens: int | None = None,
         response_format_json: bool = False,
     ) -> str:
-        # Try the primary model first. If it exhausts retries (typically
-        # because of a free-tier RPM/RPD cap), drop down to the lite
-        # fallback model so the user never just sees silence.
-        primary = model or self._settings.llm_model
-        fallback = self._settings.llm_model_fallback
-        models_to_try: list[str] = [primary]
-        if fallback and fallback != primary:
-            models_to_try.append(fallback)
+        # Walk the configured model chain (primary first, then each
+        # fallback). When a model exhausts its retries — typically because
+        # the free-tier RPM/RPD cap was hit — we move on to the next so
+        # the bot keeps replying instead of going silent for the rest of
+        # the day. An explicit `model=...` overrides the chain entirely
+        # (used by summarisation / extraction calls that pin a model).
+        if model is not None:
+            models_to_try: list[str] = [model]
+        else:
+            models_to_try = self._settings.llm_model_chain
 
         last_exc: Exception | None = None
-        for candidate in models_to_try:
+        for idx, candidate in enumerate(models_to_try):
             try:
                 return await self._chat_one(
                     messages,
@@ -81,12 +83,13 @@ class LLMClient:
                 )
             except LLMError as exc:
                 last_exc = exc
-                if candidate != models_to_try[-1]:
+                next_idx = idx + 1
+                if next_idx < len(models_to_try):
                     logger.warning(
-                        "primary model %s failed (%s) \u2014 falling back to %s",
+                        "model %s failed (%s) \u2014 falling back to %s",
                         candidate,
                         exc,
-                        models_to_try[models_to_try.index(candidate) + 1],
+                        models_to_try[next_idx],
                     )
                 continue
         assert last_exc is not None  # at least one attempt always runs
