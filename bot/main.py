@@ -97,7 +97,7 @@ async def _main() -> None:
 
     dp.include_router(build_admin_router(db=db, settings=settings))
     dp.include_router(build_start_router())
-    dp.include_router(build_inline_router(llm=llm))
+    dp.include_router(build_inline_router(llm=llm, settings=settings))
     dp.include_router(build_message_router(queue=queue, db=db, settings=settings))
 
     stop_event = asyncio.Event()
