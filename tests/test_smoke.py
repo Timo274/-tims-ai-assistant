@@ -584,6 +584,60 @@ def test_known_contact_label_threaded_into_system_prompt() -> None:
     assert "Anna" in stranger_prompt
 
 
+def test_inline_handler_times_out_under_telegram_window() -> None:
+    """Telegram drops inline answers if the bot doesn't reply within
+    ~10 seconds — the popup just stays empty for that query. The inline
+    handler must therefore cap the LLM call well under that window and
+    return a friendly timeout result instead of awaiting forever.
+
+    This guards against the regression where chat() would walk the
+    full model chain with exponential-backoff retries (3 attempts × N
+    fallback models, each up to ~45s) and quietly blow past Telegram's
+    inline-answer deadline."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from bot.handlers.inline import build_inline_router
+
+    class _SlowLLM:
+        async def chat(self, *_args, **_kwargs):
+            await asyncio.sleep(30)  # well past Telegram's ~10s window
+            return "should never get here"
+
+    async def runner() -> None:
+        router = build_inline_router(llm=_SlowLLM())  # type: ignore[arg-type]
+        # Find the registered inline_query handler.
+        handlers = router.inline_query.handlers
+        assert handlers, "inline router has no inline_query handler"
+        callback = handlers[0].callback
+
+        inline_query = MagicMock()
+        inline_query.query = "что такое pp watch"
+        inline_query.answer = AsyncMock()
+
+        # Override the default 8s timeout so the test runs fast. We
+        # monkey-patch the module-level constant the handler reads.
+        from bot.handlers import inline as inline_mod
+
+        original = inline_mod._INLINE_TOTAL_TIMEOUT
+        inline_mod._INLINE_TOTAL_TIMEOUT = 0.05
+        try:
+            await callback(inline_query)
+        finally:
+            inline_mod._INLINE_TOTAL_TIMEOUT = original
+
+        inline_query.answer.assert_awaited_once()
+        kwargs = inline_query.answer.await_args.kwargs
+        results = kwargs["results"]
+        assert len(results) == 1
+        # The fallback result must clearly communicate the timeout so
+        # the popup never just sits there blank.
+        assert "не успела" in results[0].title or "не успел" in results[0].input_message_content.message_text
+        # Timeout result must NOT be cached or the user can't retry.
+        assert kwargs["cache_time"] == 0
+
+    asyncio.run(runner())
+
+
 def test_message_queue_debounces_and_flushes() -> None:
     received: list[list[QueuedMessage]] = []
 

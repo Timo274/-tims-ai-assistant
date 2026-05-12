@@ -58,6 +58,7 @@ class LLMClient:
         top_p: float | None = None,
         max_tokens: int | None = None,
         response_format_json: bool = False,
+        attempts: int | None = None,
     ) -> str:
         # Walk the configured model chain (primary first, then each
         # fallback). When a model exhausts its retries — typically because
@@ -80,6 +81,7 @@ class LLMClient:
                     top_p=top_p,
                     max_tokens=max_tokens,
                     response_format_json=response_format_json,
+                    attempts=attempts,
                 )
             except LLMError as exc:
                 last_exc = exc
@@ -104,6 +106,7 @@ class LLMClient:
         top_p: float | None,
         max_tokens: int | None,
         response_format_json: bool,
+        attempts: int | None = None,
     ) -> str:
         params: dict[str, Any] = {
             "model": model,
@@ -115,10 +118,14 @@ class LLMClient:
         if response_format_json:
             params["response_format"] = {"type": "json_object"}
 
+        # Callers that need to fail fast (e.g. inline-mode handler, which
+        # has a hard ~10s window from Telegram) can set attempts=1 to
+        # skip the exponential-backoff retry loop entirely.
+        attempt_cap = max(1, attempts) if attempts is not None else 3
         try:
             async for attempt in AsyncRetrying(
                 reraise=True,
-                stop=stop_after_attempt(3),
+                stop=stop_after_attempt(attempt_cap),
                 wait=wait_exponential(multiplier=0.6, min=0.5, max=6),
                 retry=retry_if_exception_type(_RETRYABLE),
             ):
