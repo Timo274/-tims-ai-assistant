@@ -1,0 +1,31 @@
+# fly.io deployment config for the bot.
+# After editing this file, redeploy with: flyctl deploy
+#
+# The bot uses Telegram long polling, so it does NOT need an HTTP service or
+# public URL. We run a single always-on machine with a small persistent volume
+# for SQLite + logs.
+
+app = "tims-ai-bot"
+primary_region = "fra"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  DATABASE_URL = "sqlite+aiosqlite:///./data/bot.db"
+  LOG_DIR = "./logs"
+
+[[mounts]]
+  source = "bot_data"
+  destination = "/app/data"
+  initial_size = "1gb"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  # 256mb OOM-kills python at startup (~140MB RSS + tiktoken/sqlalchemy
+  # load + firecracker overhead). 512mb is the safe floor.
+  memory = "512mb"
+  cpus = 1
+
+[deploy]
+  strategy = "immediate"

@@ -1,0 +1,134 @@
+"""Application configuration loaded from environment variables / .env file."""
+
+from __future__ import annotations
+
+from functools import lru_cache
+from pathlib import Path
+
+from pydantic import AliasChoices, Field, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+    # Telegram
+    bot_token: str = Field(..., min_length=20)
+    # Stored as raw CSV (e.g. "111,222") and exposed as a parsed list via the
+    # `admin_ids` property. We don't type this as `list[int]` because
+    # pydantic-settings v2 tries to JSON-decode complex env values, and a CSV
+    # like "111,222" isn't valid JSON.
+    admin_ids_raw: str = Field(default="", alias="admin_ids")
+    bot_persona_name: str = "tim"
+
+    # LLM. Defaults target Google Gemini's OpenAI-compatible endpoint.
+    # `gemini-3.1-flash-lite` is the primary because it has the largest
+    # free-tier quota (15 RPM / 500 RPD) of the models on this account.
+    # `llm_model_fallbacks` is a CSV chain that the client walks left
+    # → right when the primary returns a transient error (rate limit /
+    # 5xx / connection): each model in the chain is independent free-tier
+    # quota, so when 3.1 Flash Lite hits its RPD cap the bot keeps replying
+    # via 3 Flash, then 2.5 Flash, and finally 2.5 Flash Lite. Order is
+    # deliberate: heavier-but-rarer-quota models (5 RPM) come before the
+    # other lite (10 RPM but tiny 20 RPD daily cap) so we don't burn the
+    # last lite slot before we have to.
+    llm_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai/"
+    llm_model: str = "gemini-3.1-flash-lite"
+    llm_model_fallbacks: str = "gemini-3-flash,gemini-2.5-flash,gemini-2.5-flash-lite"
+    llm_summary_model: str = "gemini-3.1-flash-lite"
+    # Accept GEMINI_API_KEY too — most users coming from aistudio.google.com
+    # will have that name in their .env.
+    llm_api_key: str = Field(
+        ...,
+        min_length=8,
+        validation_alias=AliasChoices("llm_api_key", "gemini_api_key", "openai_api_key"),
+    )
+    llm_temperature: float = 0.95
+    llm_top_p: float = 0.95
+    llm_max_tokens: int = 400
+    llm_request_timeout: float = 45.0
+
+    # Storage
+    database_url: str = "sqlite+aiosqlite:///./data/bot.db"
+
+    # Reply behaviour
+    reply_debounce_seconds: float = 2.5
+    typing_delay_per_char: float = 0.03
+    typing_delay_min: float = 0.6
+    typing_delay_max: float = 4.5
+    context_recent_messages: int = 20
+    summarise_after_messages: int = 40
+    memory_top_k: int = 8
+
+    # Rate limiting
+    rate_limit_messages: int = 20
+    rate_limit_window_seconds: int = 60
+
+    # Logging
+    log_level: str = "INFO"
+    log_dir: str = "./logs"
+
+    # Operational toggles
+    start_paused: bool = False
+    reply_in_groups: bool = False
+
+    # ----- validators ------------------------------------------------------
+    @field_validator("log_level")
+    @classmethod
+    def _upper(cls, v: str) -> str:
+        return v.upper()
+
+    # ----- helpers ---------------------------------------------------------
+    @property
+    def llm_model_chain(self) -> list[str]:
+        """Ordered model chain: primary first, then each fallback in CSV
+        order. Empty entries / duplicates are dropped. The client walks
+        this list on every chat() call and stops at the first model that
+        returns successfully."""
+        chain: list[str] = [self.llm_model]
+        for raw in self.llm_model_fallbacks.split(","):
+            m = raw.strip()
+            if m and m not in chain:
+                chain.append(m)
+        return chain
+
+    @property
+    def admin_ids(self) -> list[int]:
+        if not self.admin_ids_raw:
+            return []
+        out: list[int] = []
+        for part in self.admin_ids_raw.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                out.append(int(part))
+            except ValueError:
+                continue
+        return out
+
+    @property
+    def log_dir_path(self) -> Path:
+        return Path(self.log_dir).expanduser().resolve()
+
+    @property
+    def is_sqlite(self) -> bool:
+        return self.database_url.startswith("sqlite")
+
+    @property
+    def sqlite_path(self) -> Path | None:
+        if not self.is_sqlite:
+            return None
+        # sqlite+aiosqlite:///./data/bot.db -> ./data/bot.db
+        _, _, tail = self.database_url.partition(":///")
+        return Path(tail).expanduser().resolve() if tail else None
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    return Settings()  # type: ignore[call-arg]

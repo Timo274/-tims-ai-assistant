@@ -1,0 +1,309 @@
+From 9c2cec77d7e557a2fe0fbd921af519b1f06d30a9 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=D0=A2=D0=B8=D0=BC=D0=BE=D1=84=D1=96=D0=B9=20=D0=94=D1=8C?=
+ =?UTF-8?q?=D0=BE=D1=80=D0=B4=D1=8F=D0=B9?= <tim.iv.dordavan2007@gmail.com>
+Date: Tue, 12 May 2026 19:19:18 +0000
+Subject: [PATCH] fix(inline): cap LLM call under Telegram's 10s inline-answer
+ window
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+When the user types @<bot> <query> in a chat, Telegram drops the
+inline answer if the bot doesn't respond within ~10s. Our previous
+inline handler awaited llm.chat() with no per-call timeout, and
+chat() walks the full model fallback chain (4 models on the default
+Gemini config) with 3 exponential-backoff retries per model and a
+45s request timeout. In the worst case that's many minutes — well
+past Telegram's window, so the popup just sat empty and the user
+saw 'inline doesn't work'.
+
+Fix:
+- Pin inline calls to the primary model only (skip the fallback chain).
+- Add an 'attempts' parameter to LLMClient.chat() so callers can
+  disable the retry loop (inline uses attempts=1).
+- Wrap the call in asyncio.wait_for(timeout=8.0) — a hard cap under
+  the 10s Telegram deadline.
+- On timeout, return a clear 'не успела ответить, попробуй ещё раз'
+  result with cache_time=0 so the user can retry immediately.
+- Lower max_tokens to 200 for faster generation (replies are 1–3
+  sentences anyway).
+- Set cache_time=30 on successful answers (was 5) and 0 on errors
+  (was 5) — caching the empty-query placeholder briefly is fine but
+  caching error results made retries frustrating.
+
+Also adds a regression test that uses a deliberately slow mock LLM
+and verifies the handler returns a timeout result instead of hanging.
+
+Co-Authored-By: Devin AI <158243242+devin-ai-integration[bot]@users.noreply.github.com>
+---
+ bot/handlers/inline.py | 75 ++++++++++++++++++++++++++++++++++--------
+ bot/llm/client.py      |  9 ++++-
+ bot/main.py            |  2 +-
+ tests/test_smoke.py    | 54 ++++++++++++++++++++++++++++++
+ 4 files changed, 125 insertions(+), 15 deletions(-)
+
+diff --git a/bot/handlers/inline.py b/bot/handlers/inline.py
+index 7469322..1308c7b 100644
+--- a/bot/handlers/inline.py
++++ b/bot/handlers/inline.py
+@@ -11,6 +11,7 @@ answers short.
+ 
+ from __future__ import annotations
+ 
++import asyncio
+ import hashlib
+ from uuid import uuid4
+ 
+@@ -21,23 +22,40 @@ from aiogram.types import (
+     InputTextMessageContent,
+ )
+ 
++from bot.config import Settings, get_settings
+ from bot.llm.client import LLMClient, LLMError
+ from bot.llm.prompts import INLINE_QUERY_PROMPT
+ from bot.logger import get_logger
+ 
+ logger = get_logger(__name__)
+ 
+-# Telegram caches inline results by (query, chat_type, etc.) for this many
+-# seconds — set short so retried queries don't return stale answers.
+-_CACHE_SECONDS = 5
++# Telegram drops the inline answer if the bot doesn't respond within
++# roughly 10 seconds — after that the popup just stays empty for that
++# specific query string and the user sees "nothing happens". We cap our
++# end-to-end LLM call under that window so we always return *something*
++# even if the model is slow / rate-limited.
++_INLINE_TOTAL_TIMEOUT = 8.0
++
++# Inline replies are short by design (1–3 sentences). Capping output
++# tokens makes the model stream finish faster, which matters a lot under
++# the tight Telegram window above.
++_INLINE_MAX_TOKENS = 200
++
++# Cache successful answers briefly so repeated identical queries from the
++# same user don't re-hit the model. Errors / timeouts are NOT cached so
++# the user can retry immediately.
++_CACHE_SECONDS_OK = 30
++_CACHE_SECONDS_ERROR = 0
++_CACHE_SECONDS_EMPTY = 2
+ 
+ 
+ def _result_id(query: str) -> str:
+     return hashlib.sha256(query.encode("utf-8", errors="ignore")).hexdigest()[:32] or uuid4().hex
+ 
+ 
+-def build_inline_router(*, llm: LLMClient) -> Router:
++def build_inline_router(*, llm: LLMClient, settings: Settings | None = None) -> Router:
+     router = Router(name="inline")
++    cfg = settings or get_settings()
+ 
+     @router.inline_query()
+     async def on_inline(inline_query: InlineQuery) -> None:
+@@ -47,26 +65,57 @@ def build_inline_router(*, llm: LLMClient) -> Router:
+                 results=[
+                     InlineQueryResultArticle(
+                         id=uuid4().hex,
+-                        title="напиши вопрос после @bot",
++                        title="напиши вопрос после @бота",
+                         description="например: @timsAiAssistent_bot как обновить usdt в trust wallet",
+                         input_message_content=InputTextMessageContent(
+                             message_text="(пустой запрос)"
+                         ),
+                     )
+                 ],
+-                cache_time=_CACHE_SECONDS,
++                cache_time=_CACHE_SECONDS_EMPTY,
+                 is_personal=True,
+             )
+             return
+ 
++        # Fast path: pin to the primary model only (skip fallback chain),
++        # single attempt (no exponential-backoff retry loop), and a hard
++        # asyncio timeout. Without this, the default chat() walks the
++        # whole model chain with retries and can easily exceed Telegram's
++        # ~10s inline-answer window → popup stays empty.
+         try:
+-            answer = await llm.chat(
+-                [
+-                    {"role": "system", "content": INLINE_QUERY_PROMPT},
+-                    {"role": "user", "content": query},
++            answer = await asyncio.wait_for(
++                llm.chat(
++                    [
++                        {"role": "system", "content": INLINE_QUERY_PROMPT},
++                        {"role": "user", "content": query},
++                    ],
++                    model=cfg.llm_model,
++                    max_tokens=_INLINE_MAX_TOKENS,
++                    attempts=1,
++                ),
++                timeout=_INLINE_TOTAL_TIMEOUT,
++            )
++        except asyncio.TimeoutError:
++            logger.warning(
++                "inline LLM timed out after %.1fs (query=%r)",
++                _INLINE_TOTAL_TIMEOUT,
++                query[:80],
++            )
++            await inline_query.answer(
++                results=[
++                    InlineQueryResultArticle(
++                        id=uuid4().hex,
++                        title="модель не успела ответить",
++                        description="попробуй ещё раз — иногда бесплатный лимит тормозит",
++                        input_message_content=InputTextMessageContent(
++                            message_text=f"(не успел ответить за {_INLINE_TOTAL_TIMEOUT:.0f}с, попробуй ещё раз)"
++                        ),
++                    )
+                 ],
+-                max_tokens=300,
++                cache_time=_CACHE_SECONDS_ERROR,
++                is_personal=True,
+             )
++            return
+         except LLMError as exc:
+             logger.error("inline LLM failed: %s", exc)
+             await inline_query.answer(
+@@ -80,7 +129,7 @@ def build_inline_router(*, llm: LLMClient) -> Router:
+                         ),
+                     )
+                 ],
+-                cache_time=_CACHE_SECONDS,
++                cache_time=_CACHE_SECONDS_ERROR,
+                 is_personal=True,
+             )
+             return
+@@ -106,7 +155,7 @@ def build_inline_router(*, llm: LLMClient) -> Router:
+                     ),
+                 )
+             ],
+-            cache_time=_CACHE_SECONDS,
++            cache_time=_CACHE_SECONDS_OK,
+             is_personal=True,
+         )
+ 
+diff --git a/bot/llm/client.py b/bot/llm/client.py
+index ba04a15..b000e37 100644
+--- a/bot/llm/client.py
++++ b/bot/llm/client.py
+@@ -58,6 +58,7 @@ class LLMClient:
+         top_p: float | None = None,
+         max_tokens: int | None = None,
+         response_format_json: bool = False,
++        attempts: int | None = None,
+     ) -> str:
+         # Walk the configured model chain (primary first, then each
+         # fallback). When a model exhausts its retries — typically because
+@@ -80,6 +81,7 @@ class LLMClient:
+                     top_p=top_p,
+                     max_tokens=max_tokens,
+                     response_format_json=response_format_json,
++                    attempts=attempts,
+                 )
+             except LLMError as exc:
+                 last_exc = exc
+@@ -104,6 +106,7 @@ class LLMClient:
+         top_p: float | None,
+         max_tokens: int | None,
+         response_format_json: bool,
++        attempts: int | None = None,
+     ) -> str:
+         params: dict[str, Any] = {
+             "model": model,
+@@ -115,10 +118,14 @@ class LLMClient:
+         if response_format_json:
+             params["response_format"] = {"type": "json_object"}
+ 
++        # Callers that need to fail fast (e.g. inline-mode handler, which
++        # has a hard ~10s window from Telegram) can set attempts=1 to
++        # skip the exponential-backoff retry loop entirely.
++        attempt_cap = max(1, attempts) if attempts is not None else 3
+         try:
+             async for attempt in AsyncRetrying(
+                 reraise=True,
+-                stop=stop_after_attempt(3),
++                stop=stop_after_attempt(attempt_cap),
+                 wait=wait_exponential(multiplier=0.6, min=0.5, max=6),
+                 retry=retry_if_exception_type(_RETRYABLE),
+             ):
+diff --git a/bot/main.py b/bot/main.py
+index c652eb7..ec349b1 100644
+--- a/bot/main.py
++++ b/bot/main.py
+@@ -97,7 +97,7 @@ async def _main() -> None:
+ 
+     dp.include_router(build_admin_router(db=db, settings=settings))
+     dp.include_router(build_start_router())
+-    dp.include_router(build_inline_router(llm=llm))
++    dp.include_router(build_inline_router(llm=llm, settings=settings))
+     dp.include_router(build_message_router(queue=queue, db=db, settings=settings))
+ 
+     stop_event = asyncio.Event()
+diff --git a/tests/test_smoke.py b/tests/test_smoke.py
+index ba423dd..9cfb4f0 100644
+--- a/tests/test_smoke.py
++++ b/tests/test_smoke.py
+@@ -584,6 +584,60 @@ def test_known_contact_label_threaded_into_system_prompt() -> None:
+     assert "Anna" in stranger_prompt
+ 
+ 
++def test_inline_handler_times_out_under_telegram_window() -> None:
++    """Telegram drops inline answers if the bot doesn't reply within
++    ~10 seconds — the popup just stays empty for that query. The inline
++    handler must therefore cap the LLM call well under that window and
++    return a friendly timeout result instead of awaiting forever.
++
++    This guards against the regression where chat() would walk the
++    full model chain with exponential-backoff retries (3 attempts × N
++    fallback models, each up to ~45s) and quietly blow past Telegram's
++    inline-answer deadline."""
++    from unittest.mock import AsyncMock, MagicMock
++
++    from bot.handlers.inline import build_inline_router
++
++    class _SlowLLM:
++        async def chat(self, *_args, **_kwargs):
++            await asyncio.sleep(30)  # well past Telegram's ~10s window
++            return "should never get here"
++
++    async def runner() -> None:
++        router = build_inline_router(llm=_SlowLLM())  # type: ignore[arg-type]
++        # Find the registered inline_query handler.
++        handlers = router.inline_query.handlers
++        assert handlers, "inline router has no inline_query handler"
++        callback = handlers[0].callback
++
++        inline_query = MagicMock()
++        inline_query.query = "что такое pp watch"
++        inline_query.answer = AsyncMock()
++
++        # Override the default 8s timeout so the test runs fast. We
++        # monkey-patch the module-level constant the handler reads.
++        from bot.handlers import inline as inline_mod
++
++        original = inline_mod._INLINE_TOTAL_TIMEOUT
++        inline_mod._INLINE_TOTAL_TIMEOUT = 0.05
++        try:
++            await callback(inline_query)
++        finally:
++            inline_mod._INLINE_TOTAL_TIMEOUT = original
++
++        inline_query.answer.assert_awaited_once()
++        kwargs = inline_query.answer.await_args.kwargs
++        results = kwargs["results"]
++        assert len(results) == 1
++        # The fallback result must clearly communicate the timeout so
++        # the popup never just sits there blank.
++        assert "не успела" in results[0].title or "не успел" in results[0].input_message_content.message_text
++        # Timeout result must NOT be cached or the user can't retry.
++        assert kwargs["cache_time"] == 0
++
++    asyncio.run(runner())
++
++
+ def test_message_queue_debounces_and_flushes() -> None:
+     received: list[list[QueuedMessage]] = []
+ 
+-- 
+2.34.1
+
